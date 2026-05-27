@@ -1,4 +1,3 @@
-
 # Data processing
 pandas==2.2.2
 numpy==1.26.4
@@ -7,16 +6,12 @@ numpy==1.26.4
 scikit-learn==1.5.0
 joblib==1.4.2
 
-# Data validation
-great-expectations==0.18.15
+# Data validation (pydantic only – check_data.py uses stdlib csv/logging)
 pydantic==2.7.1
 
 # API serving
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
-
-# DVC for data versioning
-dvc==3.51.2
 
 # Observability
 prometheus-client==0.20.0
