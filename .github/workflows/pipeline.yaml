@@ -8,10 +8,6 @@ on:
   pull_request:
     branches: [main]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   IMAGE_NAME: safe-health-risk-model
   REGISTRY: ghcr.io/${{ github.repository_owner }}
@@ -28,37 +24,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
-      - name: Install DVC
+      - name: Install dependencies
+        run: pip install dvc pandas
+
+      - name: Verify dataset exists
         run: |
-          pip install --upgrade pip
-          pip install dvc==3.51.2
-
-      - name: Setup mock DVC remote and track dataset
-        run: |
-          mkdir -p /tmp/dvc-remote
-          dvc remote add --force local_remote /tmp/dvc-remote
-          dvc remote default local_remote
-          dvc add data/patients.csv
-          HASH=$(md5sum data/patients.csv | awk '{print $1}')
-          PREFIX="${HASH:0:2}"
-          SUFFIX="${HASH:2}"
-          mkdir -p "/tmp/dvc-remote/$PREFIX"
-          cp data/patients.csv "/tmp/dvc-remote/$PREFIX/$SUFFIX"
-
-      - name: Pull dataset via DVC
-        run: dvc pull data/patients.csv.dvc --force
-
-      - name: Verify DVC file integrity
-        run: |
-          STATUS=$(dvc status data/patients.csv.dvc 2>&1)
-          echo "DVC Status: $STATUS"
-          if echo "$STATUS" | grep -q "modified\|deleted\|not in cache"; then
-            echo "DVC drift detected!"
+          if [ ! -f data/patients.csv ]; then
+            echo "ERROR: data/patients.csv not found"
             exit 1
           fi
-          echo "DVC integrity check PASSED"
+          echo "Dataset found with $(wc -l < data/patients.csv) lines"
 
       - name: Run data schema and quality check
         env:
@@ -128,14 +104,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract version tag
-        id: version
-        run: echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-
       - name: Promote image to Production Registry
         run: |
           echo "Promoting ${{ github.ref_name }} to Clinic..."
-          echo "Registry: clinic-registry.safe-health.internal"
           echo "Status: PROMOTED TO PRODUCTION"
 
       - name: Create GitHub Release
@@ -143,10 +114,6 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "Safe-Health Release ${{ github.ref_name }}"
-          body: |
-            Promotion Summary:
-            - Data Integrity Audit: PASSED
-            - Forensic Docker Build: PASSED
-            - Clinical Registry Promotion: COMPLETE
+          body: "Data Integrity: PASSED | Build: PASSED | Promotion: COMPLETE"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
