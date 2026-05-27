@@ -45,15 +45,18 @@ jobs:
       - name: Create mock DVC remote storage
         run: mkdir -p /tmp/dvc-remote
 
-      # Track the CSV with DVC (creates data/patients.csv.dvc in-place)
-      # and push the cached object to the mock remote.
-      - name: Track dataset with DVC and push to remote
+      # patients.csv is currently tracked by Git (not DVC). Before DVC can
+      # manage the file, Git must release it from its index. This is a
+      # temporary in-runner change — nothing is committed here.
+      - name: Track dataset with DVC and push to mock remote
         run: |
+          git rm --cached data/patients.csv
           dvc add data/patients.csv
           dvc push
           echo "Dataset pushed to mock remote successfully"
 
-      # Simulate a fresh pull to prove the remote round-trip works.
+      # Delete the local copy, then pull from the mock remote to prove
+      # the full DVC round-trip (push → pull) works correctly.
       - name: Pull dataset via DVC (round-trip verification)
         run: |
           rm data/patients.csv
