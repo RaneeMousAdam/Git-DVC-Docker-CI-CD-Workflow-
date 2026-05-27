@@ -40,27 +40,49 @@ jobs:
       - name: Install DVC
         run: pip install --quiet dvc==3.51.2
 
-      # The .dvc/config already points remote "local_remote" → /tmp/dvc-remote.
-      # We just need to create the directory so DVC can push/pull to it.
-      - name: Create mock DVC remote storage
-        run: mkdir -p /tmp/dvc-remote
-
-      # patients.csv is currently tracked by Git (not DVC). Before DVC can
-      # manage the file, Git must release it from its index. This is a
-      # temporary in-runner change — nothing is committed here.
-      - name: Track dataset with DVC and push to mock remote
+      # ── DVC MOCK SETUP ────────────────────────────────────────────────────
+      # patients.csv is tracked by Git in this repo. Running `dvc add` in CI
+      # would conflict because DVC refuses to track Git-managed files.
+      # Instead we manually:
+      #   1. Compute the MD5 hash (DVC's content-address key)
+      #   2. Seed the mock remote at the correct DVC 3.x path structure
+      #      (/tmp/dvc-remote/files/md5/XX/YYY)
+      #   3. Write a valid .dvc tracking file pointing at that hash
+      #   4. Pull via DVC to prove the remote round-trip works
+      - name: Seed mock DVC remote and create tracking file
         run: |
-          git rm --cached data/patients.csv
-          dvc add data/patients.csv
-          dvc push
-          echo "Dataset pushed to mock remote successfully"
+          FILE="data/patients.csv"
 
-      # Delete the local copy, then pull from the mock remote to prove
-      # the full DVC round-trip (push → pull) works correctly.
+          # DVC uses MD5 as its content-address key for local remotes
+          MD5=$(md5sum "$FILE" | awk '{print $1}')
+          SIZE=$(wc -c < "$FILE" | tr -d ' ')
+          PREFIX="${MD5:0:2}"
+          SUFFIX="${MD5:2}"
+
+          # DVC 3.x remote layout: <remote>/files/md5/<XX>/<rest-of-hash>
+          mkdir -p "/tmp/dvc-remote/files/md5/$PREFIX"
+          cp "$FILE" "/tmp/dvc-remote/files/md5/$PREFIX/$SUFFIX"
+
+          # Write the .dvc tracking file (DVC 3.x YAML format)
+          cat > "${FILE}.dvc" << EOF
+outs:
+- md5: ${MD5}
+  size: ${SIZE}
+  hash: md5
+  path: patients.csv
+EOF
+
+          echo "Mock remote seeded → files/md5/$PREFIX/$SUFFIX"
+          echo "MD5: $MD5 | Size: $SIZE bytes"
+          cat "${FILE}.dvc"
+
+      # Remove the local file, then pull from the mock remote to verify
+      # the full DVC round-trip (seed → pull) works correctly.
       - name: Pull dataset via DVC (round-trip verification)
         run: |
           rm data/patients.csv
           dvc pull data/patients.csv.dvc
+          test -f data/patients.csv || { echo "ERROR: pull failed - file missing"; exit 1; }
           echo "DVC pull PASSED – dataset restored from remote"
 
       # Check that DVC reports no drift (modified / deleted / not in cache).
