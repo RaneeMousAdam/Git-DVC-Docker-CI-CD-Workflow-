@@ -63,16 +63,11 @@ jobs:
           mkdir -p "/tmp/dvc-remote/files/md5/$PREFIX"
           cp "$FILE" "/tmp/dvc-remote/files/md5/$PREFIX/$SUFFIX"
 
-          # Write the .dvc tracking file (DVC 3.x YAML format)
-          cat > "${FILE}.dvc" << EOF
-outs:
-- md5: ${MD5}
-  size: ${SIZE}
-  hash: md5
-  path: patients.csv
-EOF
+          # Write the .dvc tracking file using printf (avoids heredoc YAML issues)
+          printf 'outs:\n- md5: %s\n  size: %s\n  hash: md5\n  path: patients.csv\n' \
+            "$MD5" "$SIZE" > "${FILE}.dvc"
 
-          echo "Mock remote seeded → files/md5/$PREFIX/$SUFFIX"
+          echo "Mock remote seeded -> files/md5/$PREFIX/$SUFFIX"
           echo "MD5: $MD5 | Size: $SIZE bytes"
           cat "${FILE}.dvc"
 
