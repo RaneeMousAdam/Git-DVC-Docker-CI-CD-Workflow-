@@ -53,32 +53,40 @@ jobs:
         run: |
           FILE="data/patients.csv"
 
-          # DVC uses MD5 as its content-address key for local remotes
+          # DVC uses MD5 as its content-address key
           MD5=$(md5sum "$FILE" | awk '{print $1}')
           SIZE=$(wc -c < "$FILE" | tr -d ' ')
           PREFIX="${MD5:0:2}"
           SUFFIX="${MD5:2}"
 
-          # DVC 3.x remote layout: <remote>/files/md5/<XX>/<rest-of-hash>
+          # 1. Seed the mock REMOTE (DVC 3.x structure: files/md5/XX/YYY)
           mkdir -p "/tmp/dvc-remote/files/md5/$PREFIX"
           cp "$FILE" "/tmp/dvc-remote/files/md5/$PREFIX/$SUFFIX"
 
-          # Write the .dvc tracking file using printf (avoids heredoc YAML issues)
+          # 2. Seed the LOCAL DVC CACHE (same structure) so dvc checkout works
+          mkdir -p ".dvc/cache/files/md5/$PREFIX"
+          cp "$FILE" ".dvc/cache/files/md5/$PREFIX/$SUFFIX"
+
+          # 3. Write the .dvc tracking file with printf (avoids heredoc YAML issues)
           printf 'outs:\n- md5: %s\n  size: %s\n  hash: md5\n  path: patients.csv\n' \
             "$MD5" "$SIZE" > "${FILE}.dvc"
 
-          echo "Mock remote seeded -> files/md5/$PREFIX/$SUFFIX"
+          # 4. Tell git that DVC now manages patients.csv in this directory
+          echo '/patients.csv' >> data/.gitignore
+
+          echo "Seeded remote and cache -> files/md5/$PREFIX/$SUFFIX"
           echo "MD5: $MD5 | Size: $SIZE bytes"
           cat "${FILE}.dvc"
 
-      # Remove the local file, then pull from the mock remote to verify
-      # the full DVC round-trip (seed → pull) works correctly.
+      # Delete the live file and restore it via DVC to prove the round-trip.
+      # dvc fetch ensures the object is in cache; dvc checkout restores the file.
       - name: Pull dataset via DVC (round-trip verification)
         run: |
           rm data/patients.csv
-          dvc pull data/patients.csv.dvc
-          test -f data/patients.csv || { echo "ERROR: pull failed - file missing"; exit 1; }
-          echo "DVC pull PASSED – dataset restored from remote"
+          dvc fetch data/patients.csv.dvc
+          dvc checkout data/patients.csv.dvc
+          test -f data/patients.csv || { echo "ERROR: checkout failed - file missing"; exit 1; }
+          echo "DVC pull PASSED - dataset restored from remote"
 
       # Check that DVC reports no drift (modified / deleted / not in cache).
       - name: Verify DVC file integrity
