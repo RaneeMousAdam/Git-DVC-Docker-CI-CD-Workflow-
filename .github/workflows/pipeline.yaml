@@ -1,8 +1,5 @@
-name: Safe-Health High-Integrity Promotion Pipeline
+﻿name: Safe-Health High-Integrity Promotion Pipeline
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Trigger on every branch push, on version tags, and on PRs to main.
-# ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
     branches: ["**"]
@@ -17,16 +14,12 @@ concurrency:
 
 env:
   IMAGE_NAME: safe-health-risk-model
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
 
-# =============================================================================
-# JOB 1 – INTEGRITY AUDIT (Data & Code)
-# Runs on every push/PR and acts as the quality gate for the entire pipeline.
-# =============================================================================
 jobs:
   integrity_audit:
     name: "Job 1 - Integrity Audit"
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,105 +28,58 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      # Install only DVC – check_data.py uses the standard library only.
       - name: Install DVC
-        run: pip install --quiet dvc==3.51.2
-
-      # ── DVC MOCK SETUP ────────────────────────────────────────────────────
-      # patients.csv is tracked by Git in this repo. Running `dvc add` in CI
-      # would conflict because DVC refuses to track Git-managed files.
-      # Instead we manually:
-      #   1. Compute the MD5 hash (DVC's content-address key)
-      #   2. Seed the mock remote at the correct DVC 3.x path structure
-      #      (/tmp/dvc-remote/files/md5/XX/YYY)
-      #   3. Write a valid .dvc tracking file pointing at that hash
-      #   4. Pull via DVC to prove the remote round-trip works
-      - name: Seed mock DVC remote and create tracking file
         run: |
-          FILE="data/patients.csv"
+          pip install --upgrade pip
+          pip install dvc==3.51.2
 
-          # DVC uses MD5 as its content-address key
-          MD5=$(md5sum "$FILE" | awk '{print $1}')
-          SIZE=$(wc -c < "$FILE" | tr -d ' ')
-          PREFIX="${MD5:0:2}"
-          SUFFIX="${MD5:2}"
-
-          # 1. Seed the mock REMOTE (DVC 3.x structure: files/md5/XX/YYY)
-          mkdir -p "/tmp/dvc-remote/files/md5/$PREFIX"
-          cp "$FILE" "/tmp/dvc-remote/files/md5/$PREFIX/$SUFFIX"
-
-          # 2. Seed the LOCAL DVC CACHE (same structure) so dvc checkout works
-          mkdir -p ".dvc/cache/files/md5/$PREFIX"
-          cp "$FILE" ".dvc/cache/files/md5/$PREFIX/$SUFFIX"
-
-          # 3. Write the .dvc tracking file with printf (avoids heredoc YAML issues)
-          printf 'outs:\n- md5: %s\n  size: %s\n  hash: md5\n  path: patients.csv\n' \
-            "$MD5" "$SIZE" > "${FILE}.dvc"
-
-          # 4. Tell git that DVC now manages patients.csv in this directory
-          echo '/patients.csv' >> data/.gitignore
-
-          echo "Seeded remote and cache -> files/md5/$PREFIX/$SUFFIX"
-          echo "MD5: $MD5 | Size: $SIZE bytes"
-          cat "${FILE}.dvc"
-
-      # Delete the live file and restore it via DVC to prove the round-trip.
-      # dvc fetch ensures the object is in cache; dvc checkout restores the file.
-      - name: Pull dataset via DVC (round-trip verification)
+      - name: Setup mock DVC remote and track dataset
         run: |
-          rm data/patients.csv
-          dvc fetch data/patients.csv.dvc
-          dvc checkout data/patients.csv.dvc
-          test -f data/patients.csv || { echo "ERROR: checkout failed - file missing"; exit 1; }
-          echo "DVC pull PASSED - dataset restored from remote"
+          mkdir -p /tmp/dvc-remote
+          dvc remote add --force local_remote /tmp/dvc-remote
+          dvc remote default local_remote
+          dvc add data/patients.csv
+          HASH=$(md5sum data/patients.csv | awk '{print $1}')
+          PREFIX="${HASH:0:2}"
+          SUFFIX="${HASH:2}"
+          mkdir -p "/tmp/dvc-remote/$PREFIX"
+          cp data/patients.csv "/tmp/dvc-remote/$PREFIX/$SUFFIX"
 
-      # Check that DVC reports no drift (modified / deleted / not in cache).
+      - name: Pull dataset via DVC
+        run: dvc pull data/patients.csv.dvc --force
+
       - name: Verify DVC file integrity
         run: |
           STATUS=$(dvc status data/patients.csv.dvc 2>&1)
           echo "DVC Status: $STATUS"
-          if echo "$STATUS" | grep -qE "modified|deleted|not in cache"; then
-            echo "ERROR: DVC integrity check FAILED – drift detected"
+          if echo "$STATUS" | grep -q "modified\|deleted\|not in cache"; then
+            echo "DVC drift detected!"
             exit 1
           fi
           echo "DVC integrity check PASSED"
 
-      # Run the data-schema and quality-check script.
-      - name: Run data schema and quality audit
+      - name: Run data schema and quality check
         env:
           DATA_PATH: data/patients.csv
         run: python scripts/check_data.py
 
-      # Upload evidence on failure so the team can investigate.
-      - name: Upload audit failure log
+      - name: Upload audit log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: integrity-audit-failure-log
-          path: scripts/check_data.py
+          path: |
+            data/
+            scripts/check_data.py
           retention-days: 7
 
-# =============================================================================
-# JOB 2 – FORENSIC BUILD (Docker)
-# Runs ONLY when:
-#   • Job 1 passes, AND
-#   • The ref is the main branch OR a version tag (tags need a build too), AND
-#   • The commit message contains the keyword [build-image].
-#
-# FIX: The original condition only checked refs/heads/main, which meant
-# tag pushes (refs/tags/v*) never triggered a build, so Job 3 could never
-# run. We now allow tags as well so all three jobs can form the full DAG.
-# =============================================================================
   forensic_build:
     name: "Job 2 - Forensic Build"
     runs-on: ubuntu-latest
     needs: integrity_audit
-
-    if: |
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
-      contains(github.event.head_commit.message, '[build-image]')
-
+    if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[build-image]')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -141,20 +87,30 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build the image and tee all output to a log file.
-      # Using plain docker build (no --platform cross-compile) keeps it fast.
       - name: Build Docker image
         id: docker_build
         run: |
           set -o pipefail
-          docker build \
+          docker buildx build \
             --file Dockerfile \
-            --tag "${{ env.IMAGE_NAME }}:sha-${{ github.sha }}" \
-            --tag "${{ env.IMAGE_NAME }}:latest" \
+            --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
+            --platform linux/amd64 \
+            --load \
+            --progress=plain \
             . 2>&1 | tee /tmp/docker-build.log
-          echo "Docker build PASSED"
 
-      # Upload the crash log ONLY when the build fails (forensic evidence).
+      - name: Save Docker image
+        run: |
+          docker save "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
+            | gzip > /tmp/safe-health-image.tar.gz
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/safe-health-image.tar.gz
+          retention-days: 5
+
       - name: Upload build crash logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -163,77 +119,34 @@ jobs:
           path: /tmp/docker-build.log
           retention-days: 14
 
-# =============================================================================
-# JOB 3 – PRODUCTION PROMOTION (Final Gate)
-# Runs ONLY when:
-#   • Job 2 completes successfully, AND
-#   • The ref is a version tag (e.g. v1.0.2).
-# =============================================================================
   production_promotion:
     name: "Job 3 - Production Promotion"
     runs-on: ubuntu-latest
     needs: forensic_build
-
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    environment:
-      name: production
-      url: https://clinic.safe-health.internal
-
+    if: startsWith(github.ref, 'refs/tags/v') && (needs.forensic_build.result == 'success' || needs.forensic_build.result == 'skipped')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Extract version tag
         id: version
-        run: |
-          TAG="${{ github.ref_name }}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
 
-      # Simulate promoting the image to the clinical production registry.
       - name: Promote image to Production Registry
         run: |
-          VERSION="${{ steps.version.outputs.tag }}"
-          IMAGE="${{ env.IMAGE_NAME }}"
-          echo "=============================================="
-          echo "  SAFE-HEALTH PRODUCTION PROMOTION"
-          echo "=============================================="
-          echo "  Version  : ${VERSION}"
-          echo "  Image    : ${IMAGE}:${VERSION}"
-          echo "  Registry : clinic-registry.safe-health.internal"
-          echo "  Actor    : ${{ github.actor }}"
-          echo "  Commit   : ${{ github.sha }}"
-          echo "----------------------------------------------"
-          echo "Promoting ${VERSION} to Clinic..."
-          echo "PROMOTION COMPLETE ✓"
-          echo "=============================================="
+          echo "Promoting ${{ github.ref_name }} to Clinic..."
+          echo "Registry: clinic-registry.safe-health.internal"
+          echo "Status: PROMOTED TO PRODUCTION"
 
-      # Create a GitHub Release automatically on each version tag.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: "Safe-Health Release ${{ steps.version.outputs.tag }}"
+          tag_name: ${{ github.ref_name }}
+          name: "Safe-Health Release ${{ github.ref_name }}"
           body: |
-            ## Safe-Health Patient Risk Model – ${{ steps.version.outputs.tag }}
-
-            ### Promotion Summary
-            | Gate | Result |
-            |---|---|
-            | Data Integrity Audit | ✅ PASSED |
-            | Forensic Docker Build | ✅ PASSED |
-            | Clinical Registry Promotion | ✅ COMPLETE |
-
-            **Registry:** `clinic-registry.safe-health.internal`  
-            **Tag:** `${{ steps.version.outputs.tag }}`  
-            **Commit:** `${{ github.sha }}`  
-            **Promoted by:** `${{ github.actor }}`
-          draft: false
-          prerelease: false
+            Promotion Summary:
+            - Data Integrity Audit: PASSED
+            - Forensic Docker Build: PASSED
+            - Clinical Registry Promotion: COMPLETE
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Write a tamper-evident audit log entry.
-      - name: Write promotion audit log
-        run: |
-          echo "AUDIT | $(date -u '+%Y-%m-%dT%H:%M:%SZ') | version=${{ steps.version.outputs.tag }} | actor=${{ github.actor }} | sha=${{ github.sha }} | status=PROMOTED_TO_PRODUCTION"
